@@ -48,7 +48,7 @@ def read_balances() -> pd.DataFrame:
     return df
 
 def read_payments() -> pd.DataFrame:
-    df = pd.read_csv("data/03 Оплаты ХК.csv", sep=";")
+    df = pd.read_csv("data/03 Оплаты ХК.csv", sep=";",  decimal=",")
     return df
 
 def read_general_information() -> pd.DataFrame:
