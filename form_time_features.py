@@ -320,7 +320,7 @@ def prepare_balances(balances):
 
     return df
 
-def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.DataFrame):
+def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.DataFrame, k_days=14):
 
     payments = payments.copy()
     payments["Дата оплаты"] = pd.to_datetime(payments["Дата оплаты"], dayfirst=True, errors='coerce')
@@ -341,8 +341,6 @@ def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.
         on=["ЛС", "year", "month"],
         how="left"
     )
-
-    print(payments.columns)
 
     # --- считаем оплаты до действия (в том же месяце) ---
     pay_before = payments.merge(
@@ -386,7 +384,7 @@ def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.
 
     pay_after = merged[
         (merged["delta_days"] >= 0) &
-        (merged["delta_days"] <= 14)
+        (merged["delta_days"] <= k_days)
     ]
 
     pay_after_sum = (
@@ -422,9 +420,9 @@ def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.
 
     
     
-def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:pd.DataFrame, balance: pd.DataFrame, check_date:pd.Timestamp, k_months=3):
+def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:pd.DataFrame, balance: pd.DataFrame, check_date:pd.Timestamp, k_months=3, k_days=14):
     """
-        Требует чтобы в user_features были столбцы Days_Since_Clearance и сумма долга debt_current
+        Требует чтобы в user_features были столбцы Days_Since_Clearance и сумма долга Current_Debt
     
     Вычисляет признаки: 
         1) Сколько дней назад применялась мера A после появления долга? (Если не применялась, то 0)
@@ -458,6 +456,32 @@ def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:
         action_rows.append(tmp[["ЛС", "action", "stage", "date"]])
 
     actions_df = pd.concat(action_rows, ignore_index=True)
+
+    # --- TARGET ---
+    pay_after = payments.rename(columns={"Номер": "ЛС"}).copy()
+
+    pay_after = pay_after[
+        (pay_after["Дата оплаты"] >= check_date) &
+        (pay_after["Дата оплаты"] <= check_date + pd.Timedelta(days=k_days))
+    ]
+
+    pay_after_sum = (
+        pay_after.groupby("ЛС")["Сумма"]
+        .sum()
+        .rename("paid_after_k_days")
+    )
+
+    # добавляем в фичи
+    uf = uf.merge(pay_after_sum, on="ЛС", how="left")
+
+    uf["paid_after_k_days"] = uf["paid_after_k_days"].fillna(0)
+
+    # защита от деления на 0
+    uf["Current_Debt"] = uf["Current_Debt"].replace(0, np.nan)
+
+    # target
+    uf["target"] = uf["paid_after_k_days"] / uf["Current_Debt"]
+    uf["target"] = uf["target"].clip(lower=0, upper=1).fillna(0)
 
     # Обрезаем и оставляем только историческую информацию
     actions_df = actions_df[actions_df["date"] <= check_date]
@@ -493,18 +517,18 @@ def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:
     # --- (4) успехи ---
     # добавляем долг
     merged = merged.merge(
-        uf[["ЛС", "debt_current"]],
+        uf[["ЛС", "Current_Debt"]],
         on="ЛС",
         how="left"
     )
 
     # защита от деления на 0
-    merged["debt_current"] = merged["debt_current"].replace(0, np.nan)
+    merged["Current_Debt"] = merged["Current_Debt"].replace(0, np.nan)
 
     # считаем нормированный успех
     merged["success"] = np.where(
-        merged["delta_days"] <= 14, # TODO: константа на сколько дней смотрим успешность действия
-        merged["Сумма"] / merged["debt_current"],
+        merged["delta_days"] <= k_days, # TODO: константа на сколько дней смотрим успешность действия
+        merged["Сумма"] / merged["Current_Debt"],
         0
     )
 
@@ -620,10 +644,9 @@ def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:
     
     features[act_counts_cols] = features[act_counts_cols].fillna(value=0)
 
-    fill_success = compute_success(actions_df_all, payments, balance)
+    fill_success = compute_success(actions_df_all, payments, balance, k_days=k_days)
     
     fill_success = fill_success["mean"].to_dict()
-    print(fill_success)
     
     cols = [c for c in features.columns if c.startswith("success_rate_")]
 
