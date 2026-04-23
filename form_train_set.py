@@ -1,11 +1,11 @@
 import pandas as pd
 import numpy as np
 import re
-from form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features
-from general_information import read_balances, read_general_information
+from form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
+from general_information import read_balances, read_general_information, read_actions
 
 def build_master_dataset(time_pay: int,
-                         start_date = pd.to_datetime('2025-04-01'), end_date = pd.Timestamp.today) -> pd.DataFrame:
+                         start_date = pd.to_datetime('2025-04-01'), end_date = pd.Timestamp.today()) -> pd.DataFrame:
     """
     Создает панельный датасет, скользя по времени с шагом time_pay, собирая признаки на каждую дату.
     
@@ -15,6 +15,10 @@ def build_master_dataset(time_pay: int,
     time_pay: Шаг сдвига даты и размер окна k (в месяцах)
     end_date: Конечная дата (текущий день) в формате 'YYYY-MM-DD'
     """
+    # Количество месяцев, для подсчёта количества применённых ранее мер
+    actions_months = 3
+    # количество дней для подсчёта силы меры
+    repay_days = 14
 
     # Читаем сальдовую ведомость и удаляем из неё нулевые строки
     balances = read_balances()
@@ -25,12 +29,14 @@ def build_master_dataset(time_pay: int,
     ids = balances['ЛС']
 
     # Читаем платёжную таблицу. Удаляем лишние id.
-    df_pay = pd.read_csv("data/03 Оплаты ХК.csv", sep=";")
+    df_pay = pd.read_csv("data/03 Оплаты ХК.csv", sep=";", decimal=",")
     df_pay = df_pay[df_pay['Номер'].isin(ids)]
 
     # Читаем информацию с булевыми признаками. Удаляем лишние id.
     general_df = read_general_information()
     general_df = general_df[general_df['ЛС'].isin(ids)]
+
+    actions_df = read_actions()
 
     # Начало формирования признаков.
     snapshot_date = start_date
@@ -50,6 +56,10 @@ def build_master_dataset(time_pay: int,
         # Признаки сезонности 
         df_season = get_seasonality_features(snapshot_date)
         
+        # Признаки действий
+        df_complex_feats = actions_features(df_complex_feats, actions_df, df_pay, balances, snapshot_date, actions_months, repay_days)
+        
+        df_complex_feats.rename(columns={"ЛС": "Id"}, inplace=True)
         # --- Объединение признаков ---
         # Соединяем платежи и сальдо по Id
         merged_snapshot = pd.merge(df_complex_feats, df_pay_feats, on='Id', how='inner')

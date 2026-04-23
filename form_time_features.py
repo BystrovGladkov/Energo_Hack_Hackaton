@@ -38,7 +38,7 @@ def extract_payment_features(data: pd.DataFrame, k: int, current_date: pd.Timest
     
     # Заполняем NaN нулями для клиентов без платежей в окне и переводим в int
     result_df[freq_col_name] = result_df[freq_col_name].fillna(0).astype(int)
-    result_df.rename(columns={'Номер': 'Id'})
+    result_df.rename(columns={'Номер': 'Id'}, inplace=True)
     
     return result_df
 
@@ -216,7 +216,7 @@ def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: 
     
     # Вычитаем недавние платежи из баланса на начало месяца
     debt_df = pd.merge(latest_balance, recent_pays_sum, on='ЛС', how='left')
-    debt_df['Recent_Payments'] = pd.to_numeric(debt_df['Recent_Payments'], errors='coerce').fillna(0)
+    debt_df['Recent_Payments'] = debt_df['Recent_Payments'].fillna(0)
     debt_df['Current_Debt'] = debt_df['start'] - debt_df['Recent_Payments']
     
     # Записываем в общий результат
