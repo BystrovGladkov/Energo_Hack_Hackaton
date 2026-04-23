@@ -55,6 +55,23 @@ def read_general_information() -> pd.DataFrame:
     df = pd.read_excel("data/01 Общая информация о ЛС ХК.xlsx", header=0)
     return df
 
+information_actions = ['Автодозвон', 'E-mail', 'СМС', 'Обзвон оператором', 'Уведомление о введении ограничения', 'Выезд к абоненту', 'Заявление о выдаче судебного приказа']
+restriction_actions = ['Ограничение']
+court_actions = ['Получение судебного приказа или ИЛ']
+
+action_type = {
+    'Автодозвон':  "informing", 
+    'E-mail':  "informing",
+    'СМС':  "informing",
+    'Обзвон оператором':  "informing",
+    'Уведомление о введении ограничения':  "informing",
+    'Выезд к абоненту':  "informing",
+    'Заявление о выдаче судебного приказа':  "informing",
+    'Претензия': "informing",
+    'Ограничение': "restriction",
+    'Получение судебного приказа или ИЛ': "court",
+}
+
 def read_actions() -> Dict[str, Dict[str,pd.DataFrame]]:
     
 
@@ -93,7 +110,8 @@ def read_actions() -> Dict[str, Dict[str,pd.DataFrame]]:
         # сохраняем
         result[operation_name] = {
             "limit": limit,
-            "data": df
+            "data": df,
+            "stage": action_type[operation_name]
         }
     return result
     # теперь result — словарь с данными
