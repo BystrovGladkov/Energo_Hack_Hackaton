@@ -2,16 +2,15 @@ import pandas as pd
 import numpy as np
 from general_information import read_balances
 
-def extract_payment_features(k: int, current_date: pd.Timestamp = None) -> pd.DataFrame:
+def extract_payment_features(data: pd.DataFrame, k: int, current_date: pd.Timestamp = None) -> pd.DataFrame:
     """
-    Извлекает временные признаки из истории платежей.
+    Извлекает число платежей за последние k месяцев и число дней с последнего платежа.
     
     Параметры:
     k (int): Окно в месяцах для подсчета частоты платежей.
     current_date (pd.Timestamp): Точка отсчета для вычисления давности. 
                                  Если None, берется максимальная дата из датасета.
     """
-    data = pd.read_csv("data/03 Оплаты ХК.csv", sep=";")
 
     data['Дата оплаты'] = pd.to_datetime(data['Дата оплаты'], dayfirst=True, errors='coerce')
     data = data.dropna(subset=['Дата оплаты'])
@@ -42,7 +41,7 @@ def extract_payment_features(k: int, current_date: pd.Timestamp = None) -> pd.Da
     
     return result_df
 
-def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const = 9999) -> pd.DataFrame:
+def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: int, curr_date: pd.Timestamp, no_payment_const = 9999) -> pd.DataFrame:
     """
     Вычисляет сложные агрегированные признаки на основе начислений и истории платежей.
     
@@ -52,18 +51,15 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
     k: Количество месяцев для расчета коэффициента оплат (ratio)
     current_date: Текущая дата (строка 'YYYY-MM-DD') для отсчета времени
     """
-    # 1. Подготовка таблиц и приведение типов
-    pay_df = pd.read_csv("data/03 Оплаты ХК.csv", sep=";")
+    # Подготовка таблиц и приведение типов
     pay_df['Дата оплаты'] = pd.to_datetime(pay_df['Дата оплаты'], dayfirst=True, errors='coerce')
     pay_df = pay_df.dropna(subset=['Дата оплаты'])
 
     # Добавляем колонки года и месяца для связи таблиц
     pay_df['Year'] = pay_df['Дата оплаты'].dt.year
     pay_df['Month'] = pay_df['Дата оплаты'].dt.month
-
-    gen_info = read_balances()
     
-    # 2. Преобразование general_information из широкого формата в длинный (Unpivot)
+    # Преобразование сальдовой информации из широкого формата в длинный (Unpivot)
     # Оставляем ЛС индексом и плавим остальные колонки
     melted = gen_info.melt(id_vars=['ЛС'], var_name='Period', value_name='Value')
     
@@ -89,13 +85,13 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
     long_df = long_df[long_df['Period_Date'] < curr_date].copy()
     
     # Вычисляем исходящее сальдо на конец месяца
-    long_df['end_balance'] = long_df['start'] + long_df['accr'] - long_df['paid']
+    # Текущие начисления учитывать не нужно. Они платятся в следующий месяц.
+    long_df['end_balance'] = long_df['start'] - long_df['paid']
     
     # Подготавливаем итоговый DataFrame
-    result_df = pd.DataFrame({'Id': long_df['ЛС'].unique()})
+    result_df = pd.DataFrame({'Id': long_df['ЛС'].unique().astype(int)})
     
-    
-    # Дней с последнего полного закрытия сальдо
+    # --- Дней с последнего полного закрытия сальдо ---
     # Месяц закрытия: исходящее сальдо <= 0
     cleared_months = long_df[long_df['end_balance'] <= 0].copy()
     
@@ -123,9 +119,8 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
         
     # Заполняем пропуски для тех, кто никогда не закрывал долг большим числом
     result_df['Days_Since_Clearance'] = result_df['Days_Since_Clearance'].fillna(no_payment_const)
-
     
-    # Доля месяцев с ненулевой оплатой за последние 12 месяцев 
+    # --- Доля месяцев с ненулевой оплатой за последние 12 месяцев ---
     date_12m_ago = curr_date - pd.DateOffset(months=12)
     last_12m_df = long_df[long_df['Period_Date'] >= date_12m_ago]
     
@@ -137,8 +132,7 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
     result_df = pd.merge(result_df, paid_fraction, left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
     result_df['Payment_Fraction_12M'] = result_df['Payment_Fraction_12M'].fillna(0)
 
-
-    # Возраст долга (число последних месяцев с долгом подряд) 
+    # --- Возраст долга (число последних месяцев с долгом подряд) ---
     # Сортируем от самых свежих месяцев к старым
     sorted_long_df = long_df.sort_values(by=['ЛС', 'Period_Date'], ascending=[True, False]).copy()
     
@@ -154,12 +148,34 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
     result_df = pd.merge(result_df, debt_age, left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
     result_df['Consecutive_Debt_Months'] = result_df['Consecutive_Debt_Months'].fillna(0).astype(int)
 
-    # Сумма оплат / Сумма начислений за последние k месяцев
-    date_km_ago = curr_date - pd.DateOffset(months=k)
+    # --- Сумма оплат / Сумма начислений за последние k месяцев ---
+    date_km_ago = curr_date - pd.DateOffset(months=k+1)
     last_km_df = long_df[long_df['Period_Date'] >= date_km_ago]
+    last_km_sorted = last_km_df.sort_values(by=['ЛС', 'Period_Date'])
     
     # Считаем суммы
-    sum_k = last_km_df.groupby('ЛС')[['paid', 'accr']].sum().reset_index()
+    sum_k = last_km_sorted.groupby('ЛС')[['paid', 'accr']].sum().reset_index()
+
+    # Извлекаем первый платёж и последнее начисление для каждого ЛС
+    first_paid = last_km_sorted.groupby('ЛС')['paid'].first().reset_index(name='first_paid')
+    last_accr = last_km_sorted.groupby('ЛС')['accr'].last().reset_index(name='last_accr')
+
+    # Безопасно объединяем (merge гарантирует, что данные совпадут по нужным ЛС)
+    sum_k = pd.merge(sum_k, first_paid, on='ЛС')
+    sum_k = pd.merge(sum_k, last_accr, on='ЛС')
+
+    # Корректируем суммы согласно бизнес-логике
+    sum_k['paid'] = sum_k['paid'] - sum_k['first_paid']
+    sum_k['accr'] = sum_k['accr'] - sum_k['last_accr']
+
+    # Защита от отрицательных значений
+    # На случай аномалий в данных (например, если клиент был в выборке всего 1 месяц),
+    # чтобы суммы не ушли в минус.
+    sum_k['paid'] = sum_k['paid'].clip(lower=0)
+    sum_k['accr'] = sum_k['accr'].clip(lower=0)
+
+    # 6. Удаляем вспомогательные колонки
+    sum_k = sum_k.drop(columns=['first_paid', 'last_accr'])
     
     # Рассчитываем отношение. Используем np.where для безопасного деления на ноль (если начислений не было)
     sum_k['Payment_Accrual_Ratio_kM'] = np.where(
@@ -172,25 +188,24 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
                          left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
     result_df['Payment_Accrual_Ratio_kM'] = result_df['Payment_Accrual_Ratio_kM'].fillna(1)
 
-    # Наклон линии тренда сальдо за последние k месяцев 
+    # --- Наклон линии тренда сальдо за последние k месяцев ---
     def calc_trend(y):
         if len(y) < 2: return 0.0
         x = np.arange(len(y))
         # np.polyfit возвращает [slope, intercept]
         return np.polyfit(x, y, 1)[0]
     
-    # Сортируем в хронологическом порядке для корректного тренда
-    last_km_sorted = last_km_df.sort_values(by=['ЛС', 'Period_Date'])
     trend_df = last_km_sorted.groupby('ЛС')['end_balance'].apply(calc_trend).reset_index(name=f'Balance_Trend_Slope_{k}M')
     result_df = pd.merge(result_df, trend_df, left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
     result_df[f'Balance_Trend_Slope_{k}M'] = result_df[f'Balance_Trend_Slope_{k}M'].fillna(0.0)
 
-    # Текущее сальдо / среднее начисление за последние 3 месяца 
+    # --- Текущее сальдо / среднее начисление за последние 3 месяца ---
     latest_balance = sorted_long_df.groupby('ЛС').first().reset_index()[['ЛС', 'end_balance']]
     
     # Считаем среднее начисление за 3 месяца
-    date_3m_ago = curr_date - pd.DateOffset(months=3)
-    last_3m_df = long_df[long_df['Period_Date'] >= date_3m_ago]
+    date_4m_ago = curr_date - pd.DateOffset(months=4)
+    date_1m_ago = curr_date - pd.DateOffset(months=1)
+    last_3m_df = long_df[(long_df['Period_Date'] >= date_4m_ago) & (long_df['Period_Date'] < date_1m_ago)]
     avg_accr_3m = last_3m_df.groupby('ЛС')['accr'].mean().reset_index(name='Avg_Accrual_3M')
     
     # Объединяем и считаем ratio
@@ -203,7 +218,7 @@ def calculate_complex_features(k: int, curr_date: pd.Timestamp, no_payment_const
     )
     result_df = pd.merge(result_df, feat_6_df[['ЛС', 'Debt_to_Avg_Accrual_3M']], left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
 
-    # Число дней после условных аванса (5 число) и зарплаты (20 число) 
+    # --- Число дней после условных аванса (5 число) и зарплаты (20 число) ---
     # Поскольку current_date едина для всего датафрейма в рамках вызова функции,
     # мы рассчитываем эти значения один раз и присваиваем всем
     def get_days_since_target_day(curr_dt, target_day):
