@@ -38,6 +38,7 @@ def extract_payment_features(data: pd.DataFrame, k: int, current_date: pd.Timest
     
     # Заполняем NaN нулями для клиентов без платежей в окне и переводим в int
     result_df[freq_col_name] = result_df[freq_col_name].fillna(0).astype(int)
+    result_df.rename(columns={'Номер': 'Id'})
     
     return result_df
 
@@ -174,7 +175,7 @@ def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: 
     sum_k['paid'] = sum_k['paid'].clip(lower=0)
     sum_k['accr'] = sum_k['accr'].clip(lower=0)
 
-    # 6. Удаляем вспомогательные колонки
+    # Удаляем вспомогательные колонки
     sum_k = sum_k.drop(columns=['first_paid', 'last_accr'])
     
     # Рассчитываем отношение. Используем np.where для безопасного деления на ноль (если начислений не было)
@@ -198,6 +199,28 @@ def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: 
     trend_df = last_km_sorted.groupby('ЛС')['end_balance'].apply(calc_trend).reset_index(name=f'Balance_Trend_Slope_{k}M')
     result_df = pd.merge(result_df, trend_df, left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
     result_df[f'Balance_Trend_Slope_{k}M'] = result_df[f'Balance_Trend_Slope_{k}M'].fillna(0.0)
+
+    # --- СУММА ДОЛГА НА ТЕКУЩИЙ ДЕНЬ (Current_Debt) ---
+    # Извлекаем последний доступный баланс И его дату (1-ое число месяца)
+    latest_balance = sorted_long_df.groupby('ЛС').first().reset_index()[['ЛС', 'start', 'Period_Date']]
+    past_payments = pay_df[pay_df['Дата оплаты'] <= curr_date]
+    
+    # Привязываем к каждому платежу дату последнего начисления (Period_Date) конкретного ЛС
+    pays_with_period = pd.merge(past_payments, latest_balance[['ЛС', 'Period_Date']], left_on='Номер', right_on='ЛС', how='inner')
+    
+    # Оставляем только свежие платежи (от 1-го числа "текущего" месяца до curr_date)
+    current_month_pays = pays_with_period[pays_with_period['Дата оплаты'] >= pays_with_period['Period_Date']]
+    
+    # Суммируем эти платежи
+    recent_pays_sum = current_month_pays.groupby('ЛС')['Сумма'].sum().reset_index(name='Recent_Payments')
+    
+    # Вычитаем недавние платежи из баланса на начало месяца
+    debt_df = pd.merge(latest_balance, recent_pays_sum, on='ЛС', how='left')
+    debt_df['Recent_Payments'] = pd.to_numeric(debt_df['Recent_Payments'], errors='coerce').fillna(0)
+    debt_df['Current_Debt'] = debt_df['start'] - debt_df['Recent_Payments']
+    
+    # Записываем в общий результат
+    result_df = pd.merge(result_df, debt_df[['ЛС', 'Current_Debt']], left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
 
     # --- Текущее сальдо / среднее начисление за последние 3 месяца ---
     latest_balance = sorted_long_df.groupby('ЛС').first().reset_index()[['ЛС', 'end_balance']]

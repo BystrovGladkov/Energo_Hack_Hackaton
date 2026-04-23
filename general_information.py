@@ -4,7 +4,7 @@ import pandas as pd
 import os
 
 def read_balances() -> pd.DataFrame:
-    df = pd.read_excel("data/02 Обортно-сальдовая ведомость ЛС ХК.xlsx", header=[0, 1])
+    df = pd.read_excel("data/02 Обортно-сальдовая ведомость ЛС ХК.xlsx", header=[0, 1], decimal=',')
     
     id_col = df.columns[0]
     df.rename(columns={id_col: ("ЛС", "")})
@@ -53,6 +53,7 @@ def read_payments() -> pd.DataFrame:
 
 def read_general_information() -> pd.DataFrame:
     df = pd.read_excel("data/01 Общая информация о ЛС ХК.xlsx", header=0)
+    df.drop(columns=["Адрес (ГУИД)"], inplace=True)
     return df
 
 def read_actions() -> Dict[str, Dict[str,pd.DataFrame]]:
