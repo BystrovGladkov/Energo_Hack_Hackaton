@@ -21,7 +21,7 @@ COSTS = {
 # 3. ОБУЧЕНИЕ X-LEARNER И PROPENSITY SCORE
 # =========================================================
 
-def train_x_learner(X_train, T_train, Y_train):
+def train_x_learner(X_train, T_train, Y_train, random_state=42):
     """
     Обучает X-Learner для предсказания CATE (инкрементального эффекта).
     """
@@ -30,28 +30,28 @@ def train_x_learner(X_train, T_train, Y_train):
     # назначения каждой из 4 мер для каждого клиента, чтобы снять смещение выборки.
     propensity_model = xgb.XGBClassifier(
         objective='multi:softprob', 
-        num_class=4, 
+        num_class=12, 
         eval_metric='mlogloss',
-        n_estimators=100
+        n_estimators=100,
+        random_state=random_state,
+        n_jobs=-1
     )
     propensity_model.fit(X_train, T_train)
-    # Получаем матрицу N x 4 с вероятностями каждого Treatment
+    # Получаем матрицу N x 12 с вероятностями каждого Treatment
     p_scores = propensity_model.predict_proba(X_train)
     
     print("2. Инициализация базовых моделей XGBoost (Fractional Regression)...")
     # Используем reg:logistic, так как таргет - это доля от 0 до 1. 
-    outcome_model = xgb.XGBRegressor(objective='reg:logistic', n_estimators=100, learning_rate=0.05)
+    outcome_model = xgb.XGBRegressor(objective='reg:logistic', n_estimators=100, random_state=random_state)
 
     # 2. Модели эффектов (Учатся предсказывать разницу D, которая лежит в диапазоне [-1, 1])
     # Используем обычную MSE (squarederror), так как таргет может быть отрицательным
-    effect_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100, learning_rate=0.05)
+    effect_model = xgb.XGBRegressor(n_estimators=100, random_state=random_state)
 
     # 3. Собираем X-Learner с правильным разделением
     x_learner = BaseXRegressor(
-        control_outcome_learner=outcome_model,
-        treatment_outcome_learner=outcome_model,
-        control_effect_learner=effect_model,
-        treatment_effect_learner=effect_model,
+        learner=outcome_model,
+        effect_model=effect_model,
         control_name=0
     )
     
@@ -71,12 +71,12 @@ def optimize_decisions(x_learner, base_learner, X_test, current_debts):
     """
     print("Вычисление предсказаний (CATE)...")
     
-    # 1. Базовая вероятность (что клиент заплатит сам, если ничего не делать - T=0)
+    # Базовая вероятность (что клиент заплатит сам, если ничего не делать - T=0)
     # X-Learner извлекает ее из модели, обученной на контрольной группе
     base_pred_fraction = base_learner.predict(X_test) 
     
-    # 2. Инкрементальный эффект (насколько мера УВЕЛИЧИТ долю возврата)
-    # Возвращает матрицу N x 3 (CATE для T=1, T=2, T=3 относительно T=0)
+    # Инкрементальный эффект (насколько мера УВЕЛИЧИТ долю возврата)
+    # Возвращает матрицу N x 11 (CATE для T=1, T=2, T=3, ... относительно T=0)
     cate_estimates = x_learner.predict(X=X_test)
     
     # Создаем датафрейм для результатов
@@ -91,7 +91,7 @@ def optimize_decisions(x_learner, base_learner, X_test, current_debts):
     results['Expected_Fraction_T2'] = np.clip(base_pred_fraction + cate_estimates[:, 1], 0, 1)
     results['Expected_Fraction_T3'] = np.clip(base_pred_fraction + cate_estimates[:, 2], 0, 1)
     
-    # 3. Дискретная оптимизация (Ожидаемая Прибыль = Ожидаемый Возврат - Затраты)
+    # Дискретная оптимизация (Ожидаемая Прибыль = Ожидаемый Возврат - Затраты)
     profit_cols = []
     for t in [0, 1, 2, 3]:
         col_name = f'Expected_Profit_T{t}'
