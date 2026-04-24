@@ -3,6 +3,63 @@ import numpy as np
 import re
 from form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
 from general_information import read_balances, read_general_information, read_actions
+import random
+
+def build_dataset_random_sampling(pay_df, balances, actions_info, start_date, end_date, N=50000):
+    """
+    Собирает датасет случайным сэмплированием дат до достижения лимита N.
+    """
+    master_rows = []
+    days_diff = (end_date - start_date).days
+    
+    print(f"Начинаем случайный сбор данных (Цель: {N} записей)...")
+    
+    # Пока не набрали нужное количество строк
+    while len(master_rows) < N:
+        # Выбираем случайную дату в заданном диапазоне
+        random_days = random.randint(0, days_diff)
+        curr_dt = start_date + pd.Timedelta(days=random_days)
+        print(f"Срез на дату: {curr_dt.strftime('%Y-%m-%d')} | Собрано: {len(master_rows)}/{N}")
+        
+        # Считаем комплексные фичи на эту дату (для всех клиентов)
+        complex_feats = calculate_complex_features(pay_df, balances, k=3, curr_date=curr_dt)
+        
+        # Переименовываем Id в ЛС для совместимости с вашим actions_features
+        if 'Id' in complex_feats.columns:
+            complex_feats = complex_feats.rename(columns={'Id': 'ЛС'})
+            
+        # Рассматриваем только тех, у кого долг > 0
+        complex_feats = complex_feats[complex_feats['Current_Debt'] > 0]
+            
+        if complex_feats.empty:
+            continue
+            
+        act_feats = actions_features(complex_feats, actions_info, pay_df, balances, check_date=curr_dt, k_months=3)
+        
+        # Выделяем колонки с таймерами мер
+        days_since_cols = [c for c in act_feats.columns if c.startswith('days_since_')]
+        
+        # Проходим по клиентам в этом срезе и определяем Treatment
+        for _, row in act_feats.iterrows():
+            ls = row['ЛС']
+            
+            # Ищем, есть ли хотя бы одна мера, где days_since_{action} == 0
+            applied_today = [col for col in days_since_cols if row[col] == 0]
+            
+            if not applied_today:
+                # Ни одна мера сегодня не применялась
+                t_assigned = 0
+                row_dict = row.to_dict()
+                row_dict['curr_date'] = curr_dt
+                row_dict['Treatment'] = t_assigned
+                master_rows.append(row_dict)
+            
+            # Жесткий выход, если достигли лимита
+            if len(master_rows) >= N:
+                break
+
+    print(f"\nСбор завершен! Собрано ровно {len(master_rows)} записей.")
+    return pd.DataFrame(master_rows)
 
 def build_master_dataset(time_pay: int,
                          start_date = pd.to_datetime('2025-04-01'), end_date = pd.Timestamp.today()) -> pd.DataFrame:
