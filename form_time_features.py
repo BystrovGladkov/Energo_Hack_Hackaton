@@ -480,7 +480,7 @@ def calculate_complex_features_actions_based(
     result['Days_Since_Salary_20th'] = days_since_20th
 
     # Отбрасываем людей, которым звонили 1 января 2025 года <- мы не знаем их долг
-    resilt = result[complex_features["Current_Debt"].notna()]
+    resilt = result[result["Current_Debt"].notna()]
 
     return result
 
