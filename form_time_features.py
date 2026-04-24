@@ -668,6 +668,21 @@ def actions_features_dateless(
     k_days=14
 ):
 
+    """
+    После генерации признаков нужно заполнить пропуски в succes_rate_
+
+    succes_prior = compute_success(actions, payments, balance)
+    succes_prior = succes_prior["mean"].to_dict()
+
+    cols = [c for c in df.columns if c.startswith("success_rate_")]
+
+    for col in cols:
+        action = col.replace("success_rate_", "")
+        df[col] = df[col].fillna(succes_prior.get(action, 0))
+    
+        succes_prior - можно вычислять 1 раз.
+    """
+
     uf = user_features.copy()
     uf = uf.rename(columns={"Id": "ЛС", "action": "current_action"})
     uf["curr_date"] = pd.to_datetime(uf["curr_date"])
