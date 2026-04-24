@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import re
 from form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
+
+from form_time_features import calculate_complex_features_actions_based, actions_features_dateless, compute_success
 from general_information import read_balances, read_general_information, read_actions
 import random
 
@@ -69,13 +71,12 @@ def build_master_dataset(time_pay: int,
     Параметры:
     pay_df: Таблица платежей
     general_df: Общая таблица (содержит статические признаки)
-    time_pay: Шаг сдвига даты и размер окна k (в месяцах)
+    time_pay: Время в днях, в которые ожидается выплата долга
     end_date: Конечная дата (текущий день) в формате 'YYYY-MM-DD'
     """
     # Количество месяцев, для подсчёта количества применённых ранее мер
     actions_months = 3
     # количество дней для подсчёта силы меры
-    repay_days = 14
 
     # Читаем сальдовую ведомость и удаляем из неё нулевые строки
     balances = read_balances()
@@ -86,6 +87,9 @@ def build_master_dataset(time_pay: int,
     # Все другие таблицы должны соответствовать данным id.
     ids = balances['ЛС']
 
+    ids = ids[:1000]
+    balances = balances[balances["ЛС"].isin(ids)]
+
     # Читаем платёжную таблицу. Удаляем лишние id.
     df_pay = pd.read_csv("data/03 Оплаты ХК.csv", sep=";", decimal=",")
     df_pay = df_pay[df_pay['Номер'].isin(ids)]
@@ -94,52 +98,34 @@ def build_master_dataset(time_pay: int,
     general_df = read_general_information()
     general_df = general_df[general_df['ЛС'].isin(ids)]
 
-    actions_df = read_actions()
+    actions = read_actions()
+    for k in actions.keys():
+        d = actions[k]["data"]
+        actions[k]["data"] = d[d["ЛС"].isin(ids)]
 
-    # Начало формирования признаков.
-    snapshot_date = start_date
-    all_snapshots = []
-    print(f"Начинаем сборку панельных данных с шагом {time_pay} мес. от {snapshot_date.strftime('%Y-%m-%d')} до {end_date.strftime('%Y-%m-%d')}")
-    
-    # Скользим окном по времени
-    while snapshot_date <= end_date:
-        print(f"Обработка среза на дату: {snapshot_date.strftime('%Y-%m-%d')}...")
+    master_df = calculate_complex_features_actions_based(df_pay, balances, actions, k=actions_months)
+
+    master_df = actions_features_dateless(master_df, actions, df_pay, balances, k_days=time_pay)
+
+    succes_prior = compute_success(actions, df_pay, balances, k_days=time_pay)
+    succes_prior = succes_prior["mean"].to_dict()
         
-        # Признаки по платежам 
-        df_pay_feats = extract_payment_features(df_pay, k=3, current_date=snapshot_date)
-            
-        # Сложные сальдовые признаки и долг
-        df_complex_feats = calculate_complex_features(df_pay, balances, k=time_pay, curr_date=snapshot_date)
-        
-        # Признаки сезонности 
-        df_season = get_seasonality_features(snapshot_date)
-        
-        # Признаки действий
-        df_complex_feats = actions_features(df_complex_feats, actions_df, df_pay, balances, snapshot_date, actions_months, repay_days)
-        
-        df_complex_feats.rename(columns={"ЛС": "Id"}, inplace=True)
-        # --- Объединение признаков ---
-        # Соединяем платежи и сальдо по Id
-        merged_snapshot = pd.merge(df_complex_feats, df_pay_feats, on='Id', how='inner')
-        
-        # Добавляем колонку с датой среза 
-        merged_snapshot['Snapshot_Date'] = snapshot_date
-        
-        # Размножаем признаки сезонности (так как они одинаковы для всех ЛС в этот день)
-        for col in df_season.columns:
-            merged_snapshot[col] = df_season.iloc[0][col]
-            
-        # Сохраняем срез в список
-        all_snapshots.append(merged_snapshot)
-        
-        # Шагаем вперед на time_pay месяцев
-        snapshot_date += pd.DateOffset(months=time_pay)
-        
+
+
+    cols = [c for c in master_df.columns if c.startswith("success_rate_")]
+
+    for col in cols:
+        action = col.replace("success_rate_", "")
+        master_df[col] = master_df[col].fillna(succes_prior.get(action, 0))
+
+    seasonal_features = get_seasonality_features(master_df["curr_date"])
+
     # Соединяем все временные срезы в одну огромную таблицу
-    master_df = pd.concat(all_snapshots, ignore_index=True)
-    
+    master_df = pd.concat([master_df, seasonal_features], axis=1)
+    # master_df = pd.merge(master_df, seasonal_features, left_on='ЛС', right_on='ЛС', how='left')
+
     # Приклеиваем статические признаки из general_df ко всем строкам
-    master_df = pd.merge(master_df, general_df, left_on='Id', right_on='ЛС', how='left').drop(columns=['ЛС'])
+    master_df = pd.merge(master_df, general_df, left_on='ЛС', right_on='ЛС', how='left')
     
     print(f"Сборка завершена! Размер датасета: {master_df.shape}")
     return master_df

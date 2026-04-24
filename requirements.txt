@@ -8,3 +8,5 @@ causalml
 matplotlib
 seaborn
 ipykernel
+pulp
+pyarrow
