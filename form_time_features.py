@@ -260,33 +260,36 @@ def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: 
 
     return result_df
 
-def get_seasonality_features(dt: pd.Timestamp) -> pd.DataFrame:
+def get_seasonality_features(dates: pd.Series) -> pd.DataFrame:
     """
-    Вычисляет сезонные признаки (отопительный сезон и циклическое время).
+    Вычисляет сезонные признаки (отопительный сезон и циклическое время) 
+    для серии дат (pd.Series).
     """
-    month = dt.month
-    day_of_year = dt.dayofyear
-    days_in_year = 366 if dt.is_leap_year else 365
+    month = dates.dt.month
+    day_of_year = dates.dt.dayofyear
     
-    # Отопительный сезон (октябрь-апрель)
-    is_heating = int(month in [10, 11, 12, 1, 2, 3, 4])
+    days_in_year = 365 + dates.dt.is_leap_year.astype(int)
     
-    # Циклический месяц
-    # Формула сдвинута так, чтобы Январь (1) давал 1, а Июль (7) давал -1.
+    # Отопительный сезон
+    is_heating = month.isin([10, 11, 12, 1, 2, 3, 4]).astype(int)
+    
     month_cos = np.cos((month - 1) * (2 * np.pi / 12))
     month_sin = np.sin((month - 1) * (2 * np.pi / 12))
     
-    # Более точный вариант: циклический день года (плавное изменение каждый день)
     day_cos = np.cos((day_of_year - 1) * (2 * np.pi / days_in_year))
     day_sin = np.sin((day_of_year - 1) * (2 * np.pi / days_in_year))
     
-    return pd.DataFrame([{
+    result_df = pd.DataFrame({
         'Is_Heating_Season': is_heating,
-        'Season_Temperature_Cos': round(month_cos, 4),
-        'Season_Day_Cos': round(day_cos, 4),
-        'Season_Temperature_Sin': round(month_sin, 4),
-        'Season_Day_Sin': round(day_sin, 4)
-    }])
+        'Season_Temperature_Cos': month_cos.round(4),
+        'Season_Day_Cos': day_cos.round(4),
+        'Season_Temperature_Sin': month_sin.round(4),
+        'Season_Day_Sin': day_sin.round(4)
+    })
+    
+    result_df.index = dates.index
+    
+    return result_df
     
     
 def prepare_balances(balances):
