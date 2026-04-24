@@ -153,8 +153,14 @@ def optimize_decisions(x_learner: BaseXRegressor, X_test, current_debts):
     })
     
     # Рассчитываем итоговую долю возврата для каждого сценария (База + Инкремент)
+    # Обнуляем действия для людей с несоответствующей категорией.
     for i in range(1, 11):
         results['Expected_Fraction_T{i}'] = np.clip(base_pred_fraction + cate_estimates[:, i-1], 0, 1)
+        if i > 0 and i < 9:
+            results.loc[~X_test['current_stage'].isin(['nothing', 'informing']), f'Expected_Fraction_T{i}'] = 0
+
+    results.loc[~X_test['current_stage'].isin(['informing', 'restriction']), 'Expected_Fraction_T9'] = 0
+    results.loc[~X_test['current_stage'].isin(['restriction', 'court']), 'Expected_Fraction_T10'] = 0
 
     # Нельзя использовать телефонную связь с теми, у кого его нет, и отключить энергию, если это невозможно.
     results['Expected_Fraction_T1'] *= X_test['Наличие телефона']
