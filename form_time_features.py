@@ -480,7 +480,7 @@ def calculate_complex_features_actions_based(
     result['Days_Since_Salary_20th'] = days_since_20th
 
     # Отбрасываем людей, которым звонили 1 января 2025 года <- мы не знаем их долг
-    resilt = result[complex_features["Current_Debt"].notna()]
+    resilt = result[result["Current_Debt"].notna()]
 
     return result
 
@@ -547,7 +547,21 @@ def prepare_balances(balances):
 
     return df
 
-def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.DataFrame, k_days=14):
+def compute_success(actions:pd.DataFrame, payments:pd.DataFrame, balances:pd.DataFrame, k_days=14):
+
+    all_actions = list(actions.keys())
+
+    # --- собираем действия ---
+    action_rows = []
+    for name, info in actions.items():
+        tmp = info["data"].copy()
+        tmp = tmp.rename(columns={tmp.columns[0]: "ЛС"})
+        tmp["date"] = pd.to_datetime(tmp.iloc[:, 1])
+        tmp["action"] = name
+        tmp["stage"] = info.get("stage", "unknown")
+        action_rows.append(tmp[["ЛС", "action", "stage", "date"]])
+
+    actions_df = pd.concat(action_rows, ignore_index=True)
 
     payments = payments.copy()
     payments["Дата оплаты"] = pd.to_datetime(payments["Дата оплаты"], dayfirst=True, errors='coerce')
@@ -645,6 +659,204 @@ def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.
 
     return result    
 
+def actions_features_dateless(
+    user_features: pd.DataFrame,
+    actions: dict,
+    payments: pd.DataFrame,
+    balance: pd.DataFrame,
+    k_months=3,
+    k_days=14
+):
+
+    """
+    После генерации признаков нужно заполнить пропуски в succes_rate_
+
+    succes_prior = compute_success(actions, payments, balance)
+    succes_prior = succes_prior["mean"].to_dict()
+
+    cols = [c for c in df.columns if c.startswith("success_rate_")]
+
+    for col in cols:
+        action = col.replace("success_rate_", "")
+        df[col] = df[col].fillna(succes_prior.get(action, 0))
+    
+        succes_prior - можно вычислять 1 раз.
+    """
+
+    uf = user_features.copy()
+    uf = uf.rename(columns={"Id": "ЛС", "action": "current_action"})
+    uf["curr_date"] = pd.to_datetime(uf["curr_date"])
+
+    # --- старт долга ---
+    uf["debt_start_date"] = (
+        uf["curr_date"] - pd.to_timedelta(uf["Days_Since_Clearance"], unit="D")
+    )
+
+    # --- платежи ---
+    payments = payments.copy()
+    payments["Дата оплаты"] = pd.to_datetime(payments["Дата оплаты"], dayfirst=True, errors="coerce")
+    payments = payments.rename(columns={"Номер": "ЛС"})
+
+    # --- действия ---
+    action_rows = []
+    for name, info in actions.items():
+        tmp = info["data"].copy()
+        tmp = tmp.rename(columns={tmp.columns[0]: "ЛС"})
+        tmp["date"] = pd.to_datetime(tmp.iloc[:, 1])
+        tmp["action"] = name
+        tmp["stage"] = info.get("stage", "unknown")
+        action_rows.append(tmp[["ЛС", "action", "stage", "date"]])
+
+    actions_df = pd.concat(action_rows, ignore_index=True)
+
+    # --- привязка событий ---
+    act_ev = uf.merge(actions_df, on="ЛС", how="left")
+
+    # только прошлые действия
+    act_ev = act_ev[act_ev["date"] <= act_ev["curr_date"]]
+
+    # --- внутри долга ---
+    act_ev["in_debt"] = act_ev["date"] >= act_ev["debt_start_date"]
+
+    # --- TARGET (vectorized через merge) ---
+
+    pay = payments.rename(columns={"Номер": "ЛС"}).copy()
+    pay["Дата оплаты"] = pd.to_datetime(pay["Дата оплаты"], dayfirst=True, errors="coerce")
+
+    # джойним платежи к событиям
+    target_df = uf.merge(pay, on="ЛС", how="left")
+
+    # считаем лаг
+    target_df["delta"] = (target_df["Дата оплаты"] - target_df["curr_date"]).dt.days
+
+    # оставляем только нужное окно
+    target_df = target_df[
+        (target_df["delta"] >= 0) &
+        (target_df["delta"] <= k_days)
+    ]
+
+    # сумма платежей в окне
+    paid_after = (
+        target_df.groupby(["ЛС", "curr_date"])["Сумма"]
+        .sum()
+        .rename("paid_after_k_days")
+    )
+
+    # добавляем обратно
+    uf = uf.merge(paid_after, on=["ЛС", "curr_date"], how="left")
+
+    uf["paid_after_k_days"] = uf["paid_after_k_days"].fillna(0)
+
+    # --- target ---
+    uf["Current_Debt"] = uf["Current_Debt"].replace(0, np.nan)
+
+    uf["target"] = uf["paid_after_k_days"] / uf["Current_Debt"]
+    uf["target"] = uf["target"].clip(0, 1).fillna(0)
+
+    # --- (1) дни с момента последнего действия ---
+    last_actions = (
+        act_ev.sort_values("date")
+        .groupby(["ЛС", "curr_date", "action"])
+        .last()
+        .reset_index()
+    )
+
+    last_actions["days_since"] = (
+        last_actions["curr_date"] - last_actions["date"]
+    ).dt.days
+
+    days_since = last_actions.pivot(
+        index=["ЛС", "curr_date"],
+        columns="action",
+        values="days_since"
+    )
+
+    days_since.columns = [f"days_since_{c}" for c in days_since.columns]
+
+    # --- (2) текущий этап ---
+    stage_order = {"informing": 1, "restriction": 2, "court": 3}
+    act_ev["stage_rank"] = act_ev["stage"].map(stage_order)
+
+    current_stage = (
+        act_ev.sort_values(["ЛС", "curr_date", "stage_rank", "date"])
+        .groupby(["ЛС", "curr_date"])
+        .last()
+        .reset_index()
+    )
+
+    current_stage["days_in_stage"] = (
+        current_stage["curr_date"] - current_stage["date"]
+    ).dt.days
+
+    stage_info = current_stage[["ЛС", "curr_date", "stage", "days_in_stage"]]
+    stage_info = stage_info.rename(columns={"stage": "current_stage"})
+
+    # --- (3) число действий ---
+    cutoff = uf["curr_date"] - pd.DateOffset(months=k_months)
+
+    act_ev["recent"] = act_ev["date"] >= act_ev["curr_date"] - pd.DateOffset(months=k_months)
+
+    actions_in = (
+        act_ev[act_ev["recent"] & act_ev["in_debt"]]
+        .groupby(["ЛС", "curr_date"])
+        .size()
+        .rename("actions_last_km_in_debt")
+    )
+
+    actions_out = (
+        act_ev[act_ev["recent"] & ~act_ev["in_debt"]]
+        .groupby(["ЛС", "curr_date"])
+        .size()
+        .rename("actions_last_km_out_debt")
+    )
+
+    # --- (4) success ---
+    pay_ev = act_ev.merge(payments, on="ЛС", how="left")
+
+    pay_ev["delta"] = (pay_ev["Дата оплаты"] - pay_ev["date"]).dt.days
+
+    # оставляем только платежи после действия
+    pay_ev = pay_ev[
+        (pay_ev["delta"] >= 0) &
+        (pay_ev["delta"] <= k_days) &
+        (pay_ev["Дата оплаты"] <= pay_ev["curr_date"])
+    ]
+
+    # 👉 был ли хотя бы один платёж после действия
+    pay_ev["has_payment"] = 1
+
+    success_flag = (
+        pay_ev.groupby(["ЛС", "curr_date", "action"])["has_payment"]
+        .max()   # если был хоть один → 1
+    )
+
+    # теперь считаем среднее по действиям
+    success = (
+        success_flag
+        .groupby(["ЛС", "curr_date", "action"])
+        .mean()   # по сути доля успешных применений
+        .unstack()
+    )
+
+    success.columns = [f"success_rate_{c}" for c in success.columns]
+
+    # --- сборка ---
+    features = uf.set_index(["ЛС", "curr_date"])
+
+    for df_ in [days_since, stage_info.set_index(["ЛС", "curr_date"]), actions_in, actions_out, success]:
+        features = features.join(df_, how="left")
+
+    # --- fill ---
+    days_cols = [c for c in features.columns if c.startswith("days_since_")]
+    features[days_cols] = features[days_cols].fillna(-9999)
+
+    features["current_stage"] = features["current_stage"].fillna("nothing")
+    features["days_in_stage"] = features["days_in_stage"].fillna(features["Days_Since_Clearance"])
+
+    features[["actions_last_km_in_debt", "actions_last_km_out_debt"]] = \
+        features[["actions_last_km_in_debt", "actions_last_km_out_debt"]].fillna(0)
+
+    return features.reset_index()
     
     
 def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:pd.DataFrame, balance: pd.DataFrame, k_months=3, k_days=14):
