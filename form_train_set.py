@@ -22,6 +22,7 @@ def build_master_dataset(time_pay: int,
 
     # Читаем сальдовую ведомость и удаляем из неё нулевые строки
     balances = read_balances()
+    balances = balances[balances["ЛС"].notna()]
     cols_to_check = balances.columns.drop('ЛС')
     balances = balances[(balances[cols_to_check] != 0).any(axis=1)]
 

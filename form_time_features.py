@@ -42,7 +42,7 @@ def extract_payment_features(data: pd.DataFrame, k: int, current_date: pd.Timest
     
     return result_df
 
-def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: int, curr_date: pd.Timestamp, no_payment_const = 9999) -> pd.DataFrame:
+def calculate_complex_features(pay_df: pd.DataFrame, balances: pd.DataFrame, k: int, curr_date: pd.Timestamp, no_payment_const = 9999) -> pd.DataFrame:
     """
     Вычисляет сложные агрегированные признаки на основе начислений и истории платежей.
     
@@ -62,7 +62,7 @@ def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: 
     
     # Преобразование сальдовой информации из широкого формата в длинный (Unpivot)
     # Оставляем ЛС индексом и плавим остальные колонки
-    melted = gen_info.melt(id_vars=['ЛС'], var_name='Period', value_name='Value')
+    melted = balances.melt(id_vars=['ЛС'], var_name='Period', value_name='Value')
     
     # Извлекаем год, месяц и тип метрики из названия колонки (например, '2025_1_start')
     # Используем регулярное выражение для разделения
@@ -260,6 +260,230 @@ def calculate_complex_features(pay_df: pd.DataFrame, gen_info: pd.DataFrame, k: 
 
     return result_df
 
+def calculate_complex_features_actions_based(
+    pay_df: pd.DataFrame,
+    balances: pd.DataFrame,
+    actions: pd.DataFrame,
+    k: int,
+    no_payment_const=9999
+) -> pd.DataFrame:
+
+    all_actions = list(actions.keys())
+
+    # --- собираем действия ---
+    action_rows = []
+    for name, info in actions.items():
+        tmp = info["data"].copy()
+        tmp = tmp.rename(columns={tmp.columns[0]: "ЛС"})
+        tmp["date"] = pd.to_datetime(tmp.iloc[:, 1])
+        tmp["action"] = name
+        tmp["stage"] = info.get("stage", "unknown")
+        action_rows.append(tmp[["ЛС", "action", "stage", "date"]])
+
+    actions_df = pd.concat(action_rows, ignore_index=True)
+    actions_df["ЛС"] = actions_df["ЛС"].astype(int)
+
+    pay_df = pay_df.copy()
+    pay_df["Дата оплаты"] = pd.to_datetime(pay_df["Дата оплаты"], dayfirst=True, errors="coerce")
+    pay_df = pay_df.dropna(subset=["Дата оплаты"])
+    pay_df = pay_df.rename(columns={"Номер": "ЛС"})
+    pay_df["Year"] = pay_df["Дата оплаты"].dt.year
+    pay_df["Month"] = pay_df["Дата оплаты"].dt.month
+
+    events = actions_df.copy()
+    events["curr_date"] = pd.to_datetime(events["date"])
+    events = events[["ЛС", "curr_date", "action"]].sort_values(["ЛС", "curr_date"])
+
+    # --- balances → long ---
+    balances["ЛС"] = balances["ЛС"].astype(int)
+    melted = balances.melt(id_vars=["ЛС"], var_name="Period", value_name="Value")
+    extracted = melted["Period"].str.extract(r"(?P<Year>\d{4})_(?P<Month>\d+)_(?P<Metric>[a-zA-Z]+)")
+    melted = pd.concat([melted, extracted], axis=1)
+
+    melted["Year"] = melted["Year"].astype(int)
+    melted["Month"] = melted["Month"].astype(int)
+
+    long_df = melted.pivot_table(
+        index=["ЛС", "Year", "Month"],
+        columns="Metric",
+        values="Value",
+        aggfunc="first"
+    ).reset_index()
+
+    long_df["Period_Date"] = pd.to_datetime(
+        long_df["Year"].astype(str) + "-" + long_df["Month"].astype(str) + "-01"
+    )
+
+    long_df["end_balance"] = long_df["start"] - long_df["paid"]
+
+    # --- 🔴 КЛЮЧ: находим месяцы полного закрытия ---
+    cleared = long_df[long_df["end_balance"] <= 0][["ЛС", "Year", "Month", "Period_Date"]]
+
+    # --- находим дату последнего платежа в месяце закрытия ---
+    clearance_pay = cleared.merge(
+        pay_df,
+        on=["ЛС", "Year", "Month"],
+        how="left"
+    )
+
+    clearance_dates = (
+        clearance_pay
+        .groupby(["ЛС", "Period_Date"])["Дата оплаты"]
+        .max()
+        .reset_index()
+        .rename(columns={"Дата оплаты": "clearance_date"})
+    )
+
+    clearance_dates = clearance_dates.dropna(subset=["clearance_date"])
+    clearance_dates["clearance_date"] = pd.to_datetime(
+        clearance_dates["clearance_date"], errors="coerce"
+    )
+
+    # --- теперь делаем asof join по событиям ---
+    events_sorted = events.sort_values(["curr_date", "ЛС"])
+    clearance_dates = clearance_dates.sort_values(["clearance_date", "ЛС"])
+
+    last_clearance = pd.merge_asof(
+        events_sorted,
+        clearance_dates,    
+        left_on="curr_date",
+        right_on="clearance_date",
+        by="ЛС",
+        direction="backward"
+    )
+
+    last_clearance["Days_Since_Clearance"] = (
+        last_clearance["curr_date"] - last_clearance["clearance_date"]
+    ).dt.days
+
+    last_clearance["Days_Since_Clearance"] = last_clearance["Days_Since_Clearance"].fillna(no_payment_const)
+
+    # --- остальные признаки (по той же логике, но через фильтр по curr_date) ---
+
+    # приклеим long_df к событиям
+    long_ev = events.merge(long_df, on="ЛС", how="left")
+    long_ev = long_ev[long_ev["Period_Date"] < long_ev["curr_date"]]
+
+    # --- Payment_Fraction_12M ---
+    mask_12m = long_ev["Period_Date"] >= (long_ev["curr_date"] - pd.DateOffset(months=12))
+    tmp_12m = long_ev[mask_12m]
+
+    paid_fraction = (
+        tmp_12m.groupby(["ЛС", "curr_date"])
+        .apply(lambda x: (x["paid"] > 0).mean())
+        .reset_index(name="Payment_Fraction_12M")
+    )
+
+    # --- debt streak ---
+    long_ev = long_ev.sort_values(["ЛС", "curr_date", "Period_Date"], ascending=[True, True, False])
+    long_ev["has_debt"] = (long_ev["end_balance"] > 0).astype(int)
+    long_ev["debt_streak"] = long_ev.groupby(["ЛС", "curr_date"])["has_debt"].cumprod()
+
+    debt_age = (
+        long_ev.groupby(["ЛС", "curr_date"])["debt_streak"]
+        .sum()
+        .reset_index(name="Consecutive_Debt_Months")
+    )
+
+    # --- ratio ---
+    mask_k = long_ev["Period_Date"] >= (long_ev["curr_date"] - pd.DateOffset(months=k+1))
+    tmp_k = long_ev[mask_k].sort_values(["ЛС", "curr_date", "Period_Date"])
+
+    sum_k = tmp_k.groupby(["ЛС", "curr_date"])[["paid", "accr"]].sum().reset_index()
+
+    sum_k["Payment_Accrual_Ratio_kM"] = np.where(
+        sum_k["accr"] > 0,
+        sum_k["paid"] / sum_k["accr"],
+        1
+    )
+
+    # --- current debt ---
+    latest_balance = (
+        long_ev.sort_values(["ЛС", "curr_date", "Period_Date"], ascending=[True, True, False])
+        .groupby(["ЛС", "curr_date"])
+        .first()
+        .reset_index()[["ЛС", "curr_date", "start", "Period_Date"]]
+    )
+
+    pays = pay_df.copy()
+
+    pays_ev = events.merge(pays, on="ЛС", how="left")
+    pays_ev = pays_ev[pays_ev["Дата оплаты"] <= pays_ev["curr_date"]]
+
+    pays_ev = pays_ev.merge(
+        latest_balance[["ЛС", "curr_date", "Period_Date"]],
+        on=["ЛС", "curr_date"],
+        how="left"
+    )
+
+    pays_ev = pays_ev[pays_ev["Дата оплаты"] >= pays_ev["Period_Date"]]
+
+    recent_pays = (
+        pays_ev.groupby(["ЛС", "curr_date"])["Сумма"]
+        .sum()
+        .reset_index(name="Recent_Payments")
+    )
+
+    debt = latest_balance.merge(recent_pays, on=["ЛС", "curr_date"], how="left")
+    debt["Recent_Payments"] = debt["Recent_Payments"].fillna(0)
+    debt["Current_Debt"] = debt["start"] - debt["Recent_Payments"]
+
+    # --- финальная сборка ---
+    result = events.copy()
+
+    for df_ in [
+        last_clearance[["ЛС", "curr_date", "Days_Since_Clearance"]],
+        paid_fraction,
+        debt_age,
+        sum_k[["ЛС", "curr_date", "Payment_Accrual_Ratio_kM"]],
+        debt[["ЛС", "curr_date", "Current_Debt"]],
+    ]:
+        result = result.merge(df_, on=["ЛС", "curr_date"], how="left")
+
+    result["Payment_Fraction_12M"] = result["Payment_Fraction_12M"].fillna(0)
+    result["Consecutive_Debt_Months"] = result["Consecutive_Debt_Months"].fillna(0)
+    result["Payment_Accrual_Ratio_kM"] = result["Payment_Accrual_Ratio_kM"].fillna(1)
+
+    # --- Число дней после условных аванса (5 число) и зарплаты (20 число) ---
+    # Поскольку current_date едина для всего датафрейма в рамках вызова функции,
+    # мы рассчитываем эти значения один раз и присваиваем всем
+    def days_since_target_day(dates: pd.Series, target_day: int) -> pd.Series:
+        dates = pd.to_datetime(dates)
+
+        # день месяца
+        day = dates.dt.day
+
+        # дата с тем же месяцем
+        this_month_target = dates.dt.to_period("M").dt.to_timestamp() + pd.offsets.Day(target_day - 1)
+
+        # дата в прошлом месяце
+        prev_month = (dates - pd.DateOffset(months=1))
+        prev_month_target = prev_month.dt.to_period("M").dt.to_timestamp() + pd.offsets.Day(target_day - 1)
+
+        # выбираем
+        last_target = np.where(
+            day >= target_day,
+            this_month_target,
+            prev_month_target
+        )
+
+        last_target = pd.to_datetime(last_target)
+
+        return (dates - last_target).dt.days
+
+
+
+    days_since_5th = days_since_target_day(result["curr_date"], 5)
+    days_since_20th = days_since_target_day(result["curr_date"], 20)
+    
+    result['Days_Since_Advance_5th'] = days_since_5th
+    result['Days_Since_Salary_20th'] = days_since_20th
+
+    # Отбрасываем людей, которым звонили 1 января 2025 года <- мы не знаем их долг
+    resilt = result[complex_features["Current_Debt"].notna()]
+
+    return result
+
 def get_seasonality_features(dt: pd.Timestamp) -> pd.DataFrame:
     """
     Вычисляет сезонные признаки (отопительный сезон и циклическое время).
@@ -420,7 +644,7 @@ def compute_success(actions_df:pd.DataFrame, payments:pd.DataFrame, balances:pd.
 
     
     
-def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:pd.DataFrame, balance: pd.DataFrame, check_date:pd.Timestamp, k_months=3, k_days=14):
+def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:pd.DataFrame, balance: pd.DataFrame, k_months=3, k_days=14):
     """
         Требует чтобы в user_features были столбцы Days_Since_Clearance и сумма долга Current_Debt
     
@@ -431,12 +655,11 @@ def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:
         4) Количество успешных реакций после меры A (поступление платежа произошло через неделю после меры). Измеряем суммированием долей платежа от долга, а не просто 1 или 0.
         5) Текущий этап клиента (информирование, ограничение, суд)
     """
-    check_date = pd.to_datetime(check_date)
     
     # --- старт долга ---
     uf = user_features.copy()
     uf.rename(columns={"Id": "ЛС"}, inplace=True)
-    uf["debt_start_date"] = check_date - pd.to_timedelta(uf["Days_Since_Clearance"], unit="D")
+    uf["debt_start_date"] = uf["curr_date"] - pd.to_timedelta(uf["Days_Since_Clearance"], unit="D")
 
     # --- платежи ---
     payments = payments.copy()
@@ -655,3 +878,22 @@ def actions_features(user_features:pd.DataFrame, actions:pd.DataFrame, payments:
         features[col] = features[col].fillna(fill_success.get(action, 0))
 
     return features
+
+def get_all_actions(actions: pd.DataFrame):
+    all_actions = list(actions.keys())
+
+    # --- собираем действия ---
+    action_rows = []
+    for name, info in actions.items():
+        tmp = info["data"].copy()
+        tmp = tmp.rename(columns={tmp.columns[0]: "ЛС"})
+        tmp["date"] = pd.to_datetime(tmp.iloc[:, 1])
+        tmp["action"] = name
+        tmp["stage"] = info.get("stage", "unknown")
+        action_rows.append(tmp[["ЛС", "action", "stage", "date"]])
+
+    actions_df = pd.concat(action_rows, ignore_index=True)
+
+
+
+

@@ -60,6 +60,8 @@ information_actions = ['Автодозвон', 'E-mail', 'СМС', 'Обзвон
 restriction_actions = ['Ограничение']
 court_actions = ['Получение судебного приказа или ИЛ']
 
+
+# нулевой тип - "nothing"
 action_type = {
     'Автодозвон':  "informing", 
     'E-mail':  "informing",
