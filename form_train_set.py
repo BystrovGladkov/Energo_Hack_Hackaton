@@ -24,7 +24,7 @@ def build_dataset_random_sampling(pay_df, balances, actions_info, start_date, en
         print(f"Срез на дату: {curr_dt.strftime('%Y-%m-%d')} | Собрано: {len(master_rows)}/{N}")
         
         # Считаем комплексные фичи на эту дату (для всех клиентов)
-        complex_feats = calculate_complex_features(pay_df, balances, k=3, curr_date=curr_dt)
+        complex_feats = calculate_complex_features(pay_df, balances, k_months=3, curr_date=curr_dt)
         
         # Переименовываем Id в ЛС для совместимости с вашим actions_features
         if 'Id' in complex_feats.columns:
