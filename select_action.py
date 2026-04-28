@@ -4,10 +4,10 @@ from sklearn.preprocessing import LabelEncoder
 import xgboost as xgb
 import pandas as pd
 
-from form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
+from features.form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
 
-from form_time_features import calculate_complex_features_actions_based, actions_features_dateless, compute_success
-from general_information import read_balances, read_general_information, read_actions
+from features.form_time_features import calculate_complex_features_actions_based, actions_features_dateless, compute_success
+from utils.general_information import read_balances, read_general_information, read_actions
 
 def prepare_data(df):
     

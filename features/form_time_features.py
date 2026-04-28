@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from general_information import read_balances
+from utils.general_information import read_balances
 
 def extract_payment_features(data: pd.DataFrame, k: int, current_date: pd.Timestamp = None) -> pd.DataFrame:
     """

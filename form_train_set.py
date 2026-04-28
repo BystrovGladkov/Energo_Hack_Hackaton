@@ -1,10 +1,10 @@
 import pandas as pd
 import numpy as np
 import re
-from form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
+from features.form_time_features import extract_payment_features, calculate_complex_features, get_seasonality_features, actions_features
 
-from form_time_features import calculate_complex_features_actions_based, actions_features_dateless, compute_success
-from general_information import read_balances, read_general_information, read_actions
+from features.form_time_features import calculate_complex_features_actions_based, actions_features_dateless, compute_success
+from utils.general_information import read_balances, read_general_information, read_actions
 import random
 
 def build_dataset_random_sampling(pay_df, balances, actions_info, start_date, end_date, N=50000):

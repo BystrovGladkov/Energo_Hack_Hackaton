@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from general_information import read_balances
+from utils.general_information import read_balances
 
 if __name__ == '__main__':
     balances = read_balances()
